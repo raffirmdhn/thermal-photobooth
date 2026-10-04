@@ -2,12 +2,20 @@ import { Head } from '@inertiajs/react';
 import {
     Bluetooth,
     Camera,
+    Check,
+    Clock,
+    Copy,
     Download,
     FileImage,
+    FlipHorizontal,
     Focus,
+    Image as ImageIcon,
     Printer,
     RotateCcw,
     SlidersHorizontal,
+    Sparkles,
+    Timer,
+    Trash2,
     Unplug,
     Usb,
 } from 'lucide-react';
@@ -20,6 +28,7 @@ import {
     useRef,
     useState,
 } from 'react';
+import { toast } from 'sonner';
 import {
     Dialog,
     DialogContent,
@@ -27,19 +36,33 @@ import {
     DialogTitle,
 } from '@/components/ui/dialog';
 import {
+    clearAllHistoryPhotos,
+    createThumbnailDataUrl,
+    deletePhotoFromHistory,
+    getAllHistoryPhotos,
+    type HistoryPhoto,
+    savePhotoToHistory,
+} from '@/lib/photo-storage';
+import {
+    clearStoredConfig,
+    DEFAULT_CONFIG,
+    loadStoredConfig,
+    saveStoredConfig,
+} from '@/lib/photobooth-config';
+import {
     createEscPosPrintJob,
     getPrintLayoutDimensions,
+    isRpp02nBluetoothPort,
     PRINTER_WIDTH,
     PRINT_LAYOUT,
     processPixels,
+    type ProcessingMode,
     RPP02N_BAUD_RATE,
     RPP02N_BLUETOOTH_NAME,
     RPP02N_BLUETOOTH_SERVICE_CLASS_ID,
     RPP02N_TEST_FEED_COMMAND,
     RPP02N_USB_PRODUCT_ID,
     RPP02N_USB_VENDOR_ID,
-    isRpp02nBluetoothPort,
-    type ProcessingMode,
 } from '@/lib/thermal-printer';
 
 type PrinterState =
@@ -184,13 +207,6 @@ async function sendEscPosPrintJob(
     }
 }
 
-const defaults = {
-    brightness: 0,
-    contrast: 0,
-    threshold: 128,
-    mode: 'dither' as ProcessingMode,
-};
-
 const stateCopy: Record<PrinterState, string> = {
     unsupported:
         'Use Chrome or Edge desktop on HTTPS or localhost for USB/Bluetooth printing.',
@@ -202,6 +218,63 @@ const stateCopy: Record<PrinterState, string> = {
     ready: 'Printer command sent. Ready to print.',
     error: 'Printer connection failed. Check the cable, pairing, or printer paper.',
 };
+
+function playAudioBeep(freq = 880, duration = 0.08) {
+    try {
+        const AudioContextClass =
+            window.AudioContext ||
+            (window as unknown as { webkitAudioContext: typeof AudioContext })
+                .webkitAudioContext;
+        if (!AudioContextClass) {
+            return;
+        }
+        const audioCtx = new AudioContextClass();
+        const osc = audioCtx.createOscillator();
+        const gain = audioCtx.createGain();
+        osc.connect(gain);
+        gain.connect(audioCtx.destination);
+        osc.frequency.setValueAtTime(freq, audioCtx.currentTime);
+        gain.gain.setValueAtTime(0.12, audioCtx.currentTime);
+        gain.gain.exponentialRampToValueAtTime(
+            0.001,
+            audioCtx.currentTime + duration,
+        );
+        osc.start();
+        osc.stop(audioCtx.currentTime + duration);
+    } catch {
+        // Audio playback unavailable or blocked by browser policy
+    }
+}
+
+function playShutterSound() {
+    try {
+        const AudioContextClass =
+            window.AudioContext ||
+            (window as unknown as { webkitAudioContext: typeof AudioContext })
+                .webkitAudioContext;
+        if (!AudioContextClass) {
+            return;
+        }
+        const audioCtx = new AudioContextClass();
+        const bufferSize = Math.floor(audioCtx.sampleRate * 0.06);
+        const buffer = audioCtx.createBuffer(1, bufferSize, audioCtx.sampleRate);
+        const data = buffer.getChannelData(0);
+        for (let i = 0; i < bufferSize; i++) {
+            data[i] =
+                (Math.random() * 2 - 1) * Math.exp(-i / (bufferSize * 0.25));
+        }
+        const noise = audioCtx.createBufferSource();
+        noise.buffer = buffer;
+        const filter = audioCtx.createBiquadFilter();
+        filter.type = 'bandpass';
+        filter.frequency.value = 1400;
+        noise.connect(filter);
+        filter.connect(audioCtx.destination);
+        noise.start();
+    } catch {
+        // Silent fallback
+    }
+}
 
 function Control({
     label,
@@ -241,16 +314,19 @@ function ActionButton({
     disabled,
     onClick,
     tone = 'paper',
+    className = '',
 }: {
     children: ReactNode;
     disabled?: boolean;
     onClick: () => void;
-    tone?: 'paper' | 'ink' | 'red';
+    tone?: 'paper' | 'ink' | 'red' | 'subtle';
+    className?: string;
 }) {
     const tones = {
         paper: 'border-stone-950 bg-[#f7f1e3] text-stone-950 hover:bg-white',
         ink: 'border-stone-950 bg-stone-950 text-[#f7f1e3] hover:bg-stone-800',
         red: 'border-[#b42b1e] bg-[#b42b1e] text-white hover:bg-[#8f2017]',
+        subtle: 'border-stone-400 bg-white/60 text-stone-800 hover:bg-white',
     };
 
     return (
@@ -258,7 +334,7 @@ function ActionButton({
             type="button"
             disabled={disabled}
             onClick={onClick}
-            className={`inline-flex min-h-11 items-center justify-center gap-2 border-2 px-4 font-mono text-xs font-bold tracking-[0.1em] uppercase shadow-[3px_3px_0_#1c1917] transition-[transform,box-shadow,background-color] hover:-translate-y-0.5 hover:shadow-[4px_4px_0_#1c1917] focus-visible:outline-2 focus-visible:outline-offset-4 focus-visible:outline-[#b42b1e] disabled:cursor-not-allowed disabled:opacity-35 disabled:shadow-none ${tones[tone]}`}
+            className={`inline-flex min-h-11 items-center justify-center gap-2 border-2 px-4 font-mono text-xs font-bold tracking-[0.1em] uppercase shadow-[3px_3px_0_#1c1917] transition-[transform,box-shadow,background-color] hover:-translate-y-0.5 hover:shadow-[4px_4px_0_#1c1917] focus-visible:outline-2 focus-visible:outline-offset-4 focus-visible:outline-[#b42b1e] disabled:cursor-not-allowed disabled:opacity-35 disabled:shadow-none ${tones[tone]} ${className}`}
         >
             {children}
         </button>
@@ -272,21 +348,45 @@ export default function Welcome() {
     const cameraStreamRef = useRef<MediaStream | null>(null);
     const bluetoothPortRef = useRef<SerialPortLike | null>(null);
     const processedPixelsRef = useRef<Uint8ClampedArray | null>(null);
+    const isCapturingRef = useRef(false);
+
+    // Load initial configuration from localStorage
+    const [initialConfig] = useState(() => loadStoredConfig());
+
     const [sourceImage, setSourceImage] = useState<HTMLImageElement | null>(
         null,
     );
+    const [activePhotoId, setActivePhotoId] = useState<string | null>(null);
     const [headerLogo, setHeaderLogo] = useState<HTMLImageElement | null>(null);
     const [sourceUrl, setSourceUrl] = useState<string | null>(null);
     const [fileName, setFileName] = useState<string | null>(null);
-    const [brightness, setBrightness] = useState(defaults.brightness);
-    const [contrast, setContrast] = useState(defaults.contrast);
-    const [threshold, setThreshold] = useState(defaults.threshold);
-    const [mode, setMode] = useState<ProcessingMode>(defaults.mode);
+
+    // Configuration states (automatically saved to localStorage)
+    const [brightness, setBrightness] = useState(initialConfig.brightness);
+    const [contrast, setContrast] = useState(initialConfig.contrast);
+    const [threshold, setThreshold] = useState(initialConfig.threshold);
+    const [mode, setMode] = useState<ProcessingMode>(initialConfig.mode);
+    const [isPixelZoom, setIsPixelZoom] = useState(initialConfig.isPixelZoom);
+    const [countdownSetting, setCountdownSetting] = useState(
+        initialConfig.countdown,
+    );
+    const [mirrorCamera, setMirrorCamera] = useState(
+        initialConfig.mirrorCamera,
+    );
+
+    // UI & Action states
     const [error, setError] = useState<string | null>(null);
     const [isDragging, setIsDragging] = useState(false);
-    const [isPixelZoom, setIsPixelZoom] = useState(false);
     const [isCameraOpen, setIsCameraOpen] = useState(false);
     const [isCameraStarting, setIsCameraStarting] = useState(false);
+    const [isCopied, setIsCopied] = useState(false);
+    const [activeCountdown, setActiveCountdown] = useState<number | null>(null);
+    const [isFlashActive, setIsFlashActive] = useState(false);
+
+    // History state
+    const [historyPhotos, setHistoryPhotos] = useState<HistoryPhoto[]>([]);
+    const [isClearHistoryOpen, setIsClearHistoryOpen] = useState(false);
+
     const [printerState, setPrinterState] = useState<PrinterState>(() =>
         typeof navigator !== 'undefined' &&
         ('serial' in navigator || 'usb' in navigator)
@@ -295,6 +395,40 @@ export default function Welcome() {
     );
 
     const hasImage = sourceImage !== null;
+
+    // Load history photos from IndexedDB on mount
+    useEffect(() => {
+        let mounted = true;
+        void getAllHistoryPhotos().then((photos) => {
+            if (mounted) {
+                setHistoryPhotos(photos);
+            }
+        });
+        return () => {
+            mounted = false;
+        };
+    }, []);
+
+    // Save configuration automatically to localStorage on change
+    useEffect(() => {
+        saveStoredConfig({
+            brightness,
+            contrast,
+            threshold,
+            mode,
+            isPixelZoom,
+            countdown: countdownSetting,
+            mirrorCamera,
+        });
+    }, [
+        brightness,
+        contrast,
+        threshold,
+        mode,
+        isPixelZoom,
+        countdownSetting,
+        mirrorCamera,
+    ]);
 
     useEffect(() => {
         return () => {
@@ -312,6 +446,7 @@ export default function Welcome() {
 
     useEffect(() => {
         if (!isCameraOpen) {
+            setActiveCountdown(null);
             return;
         }
 
@@ -331,7 +466,11 @@ export default function Welcome() {
             try {
                 const stream = await navigator.mediaDevices.getUserMedia({
                     audio: false,
-                    video: { facingMode: 'user' },
+                    video: {
+                        facingMode: 'user',
+                        width: { ideal: 1280 },
+                        height: { ideal: 720 },
+                    },
                 });
 
                 if (cancelled) {
@@ -380,6 +519,7 @@ export default function Welcome() {
         };
     }, [isCameraOpen]);
 
+    // Canvas render effect
     useEffect(() => {
         const canvas = canvasRef.current;
 
@@ -544,33 +684,75 @@ export default function Welcome() {
         setError(null);
     }, [brightness, contrast, headerLogo, mode, sourceImage, threshold]);
 
-    const loadFile = useCallback((file?: File) => {
-        if (!file) {
-            return;
-        }
+    // Load an image file into state and save to history
+    const loadFile = useCallback(
+        (file?: File, shouldAddToHistory = true) => {
+            if (!file) {
+                return;
+            }
 
-        if (file.type && !file.type.startsWith('image/')) {
-            setError('Choose an image file your browser can decode.');
-            return;
-        }
+            if (file.type && !file.type.startsWith('image/')) {
+                setError('Choose an image file your browser can decode.');
+                toast.error('Please choose a valid image file (JPEG, PNG, WebP).');
+                return;
+            }
 
-        const nextUrl = URL.createObjectURL(file);
-        const image = new Image();
+            const nextUrl = URL.createObjectURL(file);
+            const image = new Image();
 
-        image.onload = () => {
-            setSourceImage(image);
-            setSourceUrl(nextUrl);
-            setFileName(file.name || 'Camera photo');
-            setError(null);
-        };
-        image.onerror = () => {
-            URL.revokeObjectURL(nextUrl);
-            setError(
-                'This image format could not be decoded. Try JPEG, PNG, or WebP.',
-            );
-        };
-        image.src = nextUrl;
-    }, []);
+            image.onload = () => {
+                setSourceImage(image);
+                setSourceUrl(nextUrl);
+                const resolvedName = file.name || 'Imported photo';
+                setFileName(resolvedName);
+                setError(null);
+
+                if (shouldAddToHistory) {
+                    const reader = new FileReader();
+                    reader.onload = async (e) => {
+                        const dataUrl = e.target?.result as string;
+                        if (dataUrl) {
+                            const thumbnail = createThumbnailDataUrl(
+                                image,
+                                image.naturalWidth,
+                                image.naturalHeight,
+                                200,
+                            );
+                            const saved = await savePhotoToHistory({
+                                name: resolvedName,
+                                source: 'upload',
+                                dataUrl,
+                                thumbnailUrl: thumbnail || dataUrl,
+                                settings: {
+                                    brightness,
+                                    contrast,
+                                    threshold,
+                                    mode,
+                                },
+                            });
+                            setActivePhotoId(saved.id);
+                            setHistoryPhotos((prev) => [
+                                saved,
+                                ...prev.filter((p) => p.id !== saved.id),
+                            ]);
+                        }
+                    };
+                    reader.readAsDataURL(file);
+                }
+            };
+
+            image.onerror = () => {
+                URL.revokeObjectURL(nextUrl);
+                setError(
+                    'This image format could not be decoded. Try JPEG, PNG, or WebP.',
+                );
+                toast.error('This image could not be decoded.');
+            };
+
+            image.src = nextUrl;
+        },
+        [brightness, contrast, mode, threshold],
+    );
 
     const handleInput = (event: ChangeEvent<HTMLInputElement>) => {
         loadFile(event.target.files?.[0]);
@@ -583,11 +765,52 @@ export default function Welcome() {
         loadFile(event.dataTransfer.files[0]);
     };
 
-    const capturePhoto = () => {
+    // Load a photo from history into active preview
+    const loadHistoryPhoto = useCallback((photo: HistoryPhoto) => {
+        const image = new Image();
+        image.onload = () => {
+            setSourceImage(image);
+            setFileName(photo.name);
+            setActivePhotoId(photo.id);
+            setError(null);
+            toast.success(`Loaded "${photo.name}" into preview.`);
+        };
+        image.onerror = () => {
+            toast.error('Failed to load this photo.');
+        };
+        image.src = photo.dataUrl;
+    }, []);
+
+    // Delete single photo from history
+    const handleDeletePhoto = useCallback(
+        async (photoId: string, event?: React.MouseEvent) => {
+            event?.stopPropagation();
+            await deletePhotoFromHistory(photoId);
+            setHistoryPhotos((prev) => prev.filter((p) => p.id !== photoId));
+            if (activePhotoId === photoId) {
+                setActivePhotoId(null);
+            }
+            toast.info('Photo removed from history.');
+        },
+        [activePhotoId],
+    );
+
+    // Clear all photos from history
+    const handleClearAllHistory = useCallback(async () => {
+        await clearAllHistoryPhotos();
+        setHistoryPhotos([]);
+        setIsClearHistoryOpen(false);
+        toast.info('Photo history cleared.');
+    }, []);
+
+    // Perform the camera frame capture
+    const performCapture = useCallback(() => {
         const video = videoRef.current;
 
         if (!video || video.readyState < HTMLMediaElement.HAVE_CURRENT_DATA) {
             setError('Wait for the camera preview before taking a photo.');
+            toast.error('Wait for camera preview to initialize.');
+            isCapturingRef.current = false;
             return;
         }
 
@@ -596,52 +819,185 @@ export default function Welcome() {
 
         if (!context) {
             setError('This browser cannot capture the camera image.');
+            isCapturingRef.current = false;
             return;
         }
 
         captureCanvas.width = video.videoWidth;
         captureCanvas.height = video.videoHeight;
-        context.translate(captureCanvas.width, 0);
-        context.scale(-1, 1);
+
+        if (mirrorCamera) {
+            context.translate(captureCanvas.width, 0);
+            context.scale(-1, 1);
+        }
+
         context.drawImage(video, 0, 0);
-        captureCanvas.toBlob((blob) => {
-            if (!blob) {
-                setError('The camera photo could not be captured.');
-                return;
-            }
 
-            loadFile(
-                new File([blob], `camera-photo-${Date.now()}.png`, {
-                    type: 'image/png',
-                }),
-            );
+        playShutterSound();
+        setIsFlashActive(true);
+        setTimeout(() => setIsFlashActive(false), 200);
+
+        const dataUrl = captureCanvas.toDataURL('image/png', 0.95);
+        const thumbnail = createThumbnailDataUrl(
+            captureCanvas,
+            captureCanvas.width,
+            captureCanvas.height,
+            240,
+        );
+
+        const photoName = `Camera photo ${new Date().toLocaleTimeString([], {
+            hour: '2-digit',
+            minute: '2-digit',
+            second: '2-digit',
+        })}`;
+
+        const image = new Image();
+        image.onload = async () => {
+            setSourceImage(image);
+            setFileName(photoName);
+
+            const saved = await savePhotoToHistory({
+                name: photoName,
+                source: 'camera',
+                dataUrl,
+                thumbnailUrl: thumbnail || dataUrl,
+                settings: { brightness, contrast, threshold, mode },
+            });
+
+            setActivePhotoId(saved.id);
+            setHistoryPhotos((prev) => [
+                saved,
+                ...prev.filter((p) => p.id !== saved.id),
+            ]);
+
             setIsCameraOpen(false);
-        }, 'image/png');
-    };
+            setActiveCountdown(null);
+            isCapturingRef.current = false;
+            toast.success('Photo captured and saved to history!');
+        };
+        image.src = dataUrl;
+    }, [brightness, contrast, mirrorCamera, mode, threshold]);
 
+    // Handle capture button with optional countdown timer
+    const triggerCaptureWithCountdown = useCallback(() => {
+        if (isCapturingRef.current) {
+            return;
+        }
+
+        if (countdownSetting <= 0) {
+            isCapturingRef.current = true;
+            performCapture();
+            return;
+        }
+
+        isCapturingRef.current = true;
+        let count = countdownSetting;
+        setActiveCountdown(count);
+        playAudioBeep(880, 0.09);
+
+        const timer = setInterval(() => {
+            count -= 1;
+            if (count > 0) {
+                setActiveCountdown(count);
+                playAudioBeep(880, 0.09);
+            } else {
+                clearInterval(timer);
+                setActiveCountdown(null);
+                playAudioBeep(1760, 0.16);
+                performCapture();
+            }
+        }, 1000);
+    }, [countdownSetting, performCapture]);
+
+    // Reset controls to factory defaults
     const resetControls = () => {
-        setBrightness(defaults.brightness);
-        setContrast(defaults.contrast);
-        setThreshold(defaults.threshold);
-        setMode(defaults.mode);
+        setBrightness(DEFAULT_CONFIG.brightness);
+        setContrast(DEFAULT_CONFIG.contrast);
+        setThreshold(DEFAULT_CONFIG.threshold);
+        setMode(DEFAULT_CONFIG.mode);
+        setIsPixelZoom(DEFAULT_CONFIG.isPixelZoom);
+        setCountdownSetting(DEFAULT_CONFIG.countdown);
+        setMirrorCamera(DEFAULT_CONFIG.mirrorCamera);
+        clearStoredConfig();
+        toast.info('Controls reset to default values.');
     };
 
-    const download = () => {
-        canvasRef.current?.toBlob((blob) => {
+    // Save/Download the preview receipt image to user's device
+    const downloadReceipt = useCallback(() => {
+        const canvas = canvasRef.current;
+        if (!canvas || !hasImage) {
+            setError('No photo loaded to save.');
+            toast.error('No photo loaded to save.');
+            return;
+        }
+
+        canvas.toBlob((blob) => {
             if (!blob) {
                 setError('The processed image could not be downloaded.');
+                toast.error('Could not generate receipt image.');
                 return;
             }
 
             const url = URL.createObjectURL(blob);
             const link = document.createElement('a');
+            const now = new Date();
+            const pad = (n: number) => n.toString().padStart(2, '0');
+            const timestamp = `${now.getFullYear()}${pad(now.getMonth() + 1)}${pad(now.getDate())}-${pad(now.getHours())}${pad(now.getMinutes())}${pad(now.getSeconds())}`;
+
             link.href = url;
-            link.download = 'thermal-photo.png';
+            link.download = `thermal-receipt-${timestamp}.png`;
             link.click();
             URL.revokeObjectURL(url);
+            toast.success('Thermal receipt saved to your device!');
         }, 'image/png');
-    };
+    }, [hasImage]);
 
+    // Copy the preview receipt image directly to clipboard
+    const copyReceiptToClipboard = useCallback(async () => {
+        const canvas = canvasRef.current;
+        if (!canvas || !hasImage) {
+            toast.error('No photo preview to copy.');
+            return;
+        }
+
+        try {
+            canvas.toBlob(async (blob) => {
+                if (!blob) {
+                    toast.error('Failed to create image blob.');
+                    return;
+                }
+
+                if (!navigator.clipboard?.write) {
+                    toast.error(
+                        'Clipboard image write is not supported in this browser.',
+                    );
+                    return;
+                }
+
+                await navigator.clipboard.write([
+                    new ClipboardItem({ 'image/png': blob }),
+                ]);
+
+                setIsCopied(true);
+                setTimeout(() => setIsCopied(false), 2200);
+                toast.success('Receipt image copied to clipboard! Ready to paste (Ctrl+V / Cmd+V).');
+            }, 'image/png');
+        } catch (err) {
+            console.error('Clipboard copy error:', err);
+            toast.error('Could not copy image to clipboard.');
+        }
+    }, [hasImage]);
+
+    // Download raw source photo
+    const downloadRawPhoto = useCallback((dataUrl: string, name: string) => {
+        const link = document.createElement('a');
+        link.href = dataUrl;
+        link.download = name.endsWith('.png') ? name : `${name}.png`;
+        link.click();
+        toast.success('Original photo saved to device!');
+    }, []);
+
+    // Bluetooth printer logic
     const runPrinterCommand = async (
         send: PrinterCommand,
         busyState: 'printing' | 'testing',
@@ -671,8 +1027,6 @@ export default function Welcome() {
                 authorizedPorts.length === 1 ? authorizedPorts[0] : undefined;
             const onlyAuthorizedPortInfo =
                 onlyAuthorizedPort?.getInfo?.() ?? {};
-            // ponytail: macOS can omit Bluetooth metadata; reuse one
-            // unlabelled authorized port, but keep the picker for ambiguity.
             const unidentifiedBluetoothPort =
                 onlyAuthorizedPort &&
                 onlyAuthorizedPortInfo.bluetoothServiceClassId === undefined &&
@@ -748,6 +1102,7 @@ export default function Welcome() {
         }
     };
 
+    // USB printer logic
     const runUsbPrinterCommand = async (
         send: PrinterCommand,
         busyState: 'printing' | 'testing',
@@ -884,6 +1239,7 @@ export default function Welcome() {
 
         if (!canvas || !pixels) {
             setError('Load a photo before printing.');
+            toast.error('Load a photo before printing.');
             return null;
         }
 
@@ -934,7 +1290,7 @@ export default function Welcome() {
         <>
             <Head title="Thermal Photobooth" />
             <main className="thermal-studio min-h-screen text-stone-950">
-                <div className="mx-auto grid min-h-screen max-w-[1500px] grid-rows-[auto_1fr] px-4 py-5 sm:px-7 lg:px-10 lg:py-8">
+                <div className="mx-auto flex min-h-screen max-w-[1500px] flex-col px-4 py-5 sm:px-7 lg:px-10 lg:py-8">
                     <header className="flex items-end justify-between gap-6 border-b-2 border-stone-950 pb-4">
                         <div>
                             <p className="font-mono text-[10px] font-bold tracking-[0.28em] text-[#b42b1e] uppercase">
@@ -950,7 +1306,9 @@ export default function Welcome() {
                         </div>
                     </header>
 
-                    <div className="grid gap-7 py-7 lg:grid-cols-[minmax(280px,0.8fr)_minmax(420px,1.35fr)_minmax(280px,0.85fr)] lg:gap-8">
+                    {/* Main 3-Column Studio Grid */}
+                    <div className="grid gap-7 py-7 lg:grid-cols-[minmax(280px,0.85fr)_minmax(420px,1.3fr)_minmax(300px,0.9fr)] lg:gap-8">
+                        {/* 01 / Source */}
                         <section className="flex flex-col gap-6">
                             <div>
                                 <p className="thermal-kicker">01 / Source</p>
@@ -991,7 +1349,7 @@ export default function Welcome() {
                                                 fileInputRef.current?.click()
                                             }
                                         >
-                                            <FileImage size={15} /> Select
+                                            <FileImage size={15} /> Select File
                                         </ActionButton>
                                         <ActionButton
                                             onClick={() =>
@@ -999,7 +1357,7 @@ export default function Welcome() {
                                             }
                                             tone="red"
                                         >
-                                            <Camera size={15} /> Camera
+                                            <Camera size={15} /> Live Camera
                                         </ActionButton>
                                     </div>
                                 </div>
@@ -1017,15 +1375,16 @@ export default function Welcome() {
                                     <span className="text-stone-500">
                                         Current file
                                     </span>
-                                    <span className="truncate font-bold">
+                                    <span className="truncate font-bold text-stone-950">
                                         {fileName ?? 'None loaded'}
                                     </span>
                                 </p>
                             </div>
                         </section>
 
+                        {/* 02 / Preview */}
                         <section className="min-w-0">
-                            <div className="mb-5 flex items-end justify-between gap-4">
+                            <div className="mb-5 flex flex-wrap items-end justify-between gap-4">
                                 <div>
                                     <p className="thermal-kicker">
                                         02 / Preview
@@ -1034,20 +1393,68 @@ export default function Welcome() {
                                         Print simulation
                                     </h2>
                                 </div>
-                                <button
-                                    type="button"
-                                    disabled={!hasImage}
-                                    onClick={() =>
-                                        setIsPixelZoom((value) => !value)
-                                    }
-                                    className="inline-flex items-center gap-2 border-b border-stone-950 pb-1 font-mono text-[10px] font-bold tracking-wider uppercase disabled:opacity-30"
-                                >
-                                    <Focus size={14} />{' '}
-                                    {isPixelZoom ? 'Fit receipt' : 'Pixel zoom'}
-                                </button>
+                                <div className="flex items-center gap-3">
+                                    <button
+                                        type="button"
+                                        disabled={!hasImage}
+                                        onClick={() =>
+                                            setIsPixelZoom((value) => !value)
+                                        }
+                                        className="inline-flex items-center gap-1.5 border-b border-stone-950 pb-1 font-mono text-[10px] font-bold tracking-wider uppercase disabled:opacity-30"
+                                    >
+                                        <Focus size={14} />{' '}
+                                        {isPixelZoom
+                                            ? 'Fit receipt'
+                                            : 'Pixel zoom'}
+                                    </button>
+                                </div>
                             </div>
 
-                            <div className="receipt-desk min-h-[520px] overflow-auto border-2 border-stone-950 p-5 sm:p-8">
+                            <div className="receipt-desk relative min-h-[520px] overflow-auto border-2 border-stone-950 p-5 sm:p-8">
+                                {/* Quick floating toolbar on top of receipt */}
+                                {hasImage && (
+                                    <div className="mb-4 flex flex-wrap items-center justify-between gap-2 border border-stone-400/80 bg-[#f7f1e3]/90 px-3 py-2 text-stone-900 shadow-[2px_2px_0_#1c1917] backdrop-blur-sm">
+                                        <div className="flex items-center gap-2 font-mono text-[10px] font-bold tracking-wider uppercase">
+                                            <span className="inline-block size-2 rounded-full bg-emerald-600" />
+                                            <span>384 × 203 DPI Ready</span>
+                                        </div>
+                                        <div className="flex items-center gap-2">
+                                            <button
+                                                type="button"
+                                                onClick={copyReceiptToClipboard}
+                                                className="inline-flex items-center gap-1 border border-stone-950 bg-white px-2 py-1 font-mono text-[10px] font-bold uppercase hover:bg-stone-100"
+                                                title="Copy receipt image to clipboard"
+                                            >
+                                                {isCopied ? (
+                                                    <>
+                                                        <Check
+                                                            size={13}
+                                                            className="text-emerald-600"
+                                                        />
+                                                        <span className="text-emerald-700">
+                                                            Copied!
+                                                        </span>
+                                                    </>
+                                                ) : (
+                                                    <>
+                                                        <Copy size={13} />
+                                                        <span>Copy</span>
+                                                    </>
+                                                )}
+                                            </button>
+                                            <button
+                                                type="button"
+                                                onClick={downloadReceipt}
+                                                className="inline-flex items-center gap-1 border border-stone-950 bg-white px-2 py-1 font-mono text-[10px] font-bold uppercase hover:bg-stone-100"
+                                                title="Save receipt image to device"
+                                            >
+                                                <Download size={13} />
+                                                <span>Save</span>
+                                            </button>
+                                        </div>
+                                    </div>
+                                )}
+
                                 <div className="print-receipt mx-auto min-h-[470px] w-[min(100%,290px)] bg-white px-[5mm] pt-8 pb-12 shadow-[0_16px_35px_rgba(28,25,23,0.25)]">
                                     {!hasImage && (
                                         <div className="receipt-placeholder grid min-h-80 place-items-center border border-dashed border-stone-300 text-center">
@@ -1075,14 +1482,22 @@ export default function Welcome() {
                             </div>
                         </section>
 
+                        {/* 03 / Tune */}
                         <section className="flex min-w-0 flex-col gap-6">
-                            <div>
-                                <p className="thermal-kicker">03 / Tune</p>
-                                <h2 className="thermal-heading">
-                                    Shape the dots
-                                </h2>
+                            <div className="flex items-end justify-between gap-2">
+                                <div>
+                                    <p className="thermal-kicker">03 / Tune</p>
+                                    <h2 className="thermal-heading">
+                                        Shape the dots
+                                    </h2>
+                                </div>
+                                <span className="inline-flex items-center gap-1.5 border border-stone-400/60 bg-white/70 px-2 py-1 font-mono text-[9px] font-bold tracking-wider text-stone-600 uppercase">
+                                    <span className="size-1.5 rounded-full bg-emerald-600 animate-pulse" />
+                                    Auto-saved
+                                </span>
                             </div>
-                            <div className="grid gap-6 border-2 border-stone-950 bg-[#f7f1e3] p-5 shadow-[5px_5px_0_#1c1917]">
+
+                            <div className="grid gap-5 border-2 border-stone-950 bg-[#f7f1e3] p-5 shadow-[5px_5px_0_#1c1917]">
                                 <Control
                                     label="Brightness"
                                     value={brightness}
@@ -1119,23 +1534,56 @@ export default function Welcome() {
                                                 key={option}
                                                 type="button"
                                                 onClick={() => setMode(option)}
-                                                className={`px-2 py-2 font-mono text-[10px] font-bold tracking-wider uppercase ${mode === option ? 'bg-stone-950 text-white' : 'hover:bg-stone-100'}`}
+                                                className={`px-2 py-2 font-mono text-[10px] font-bold tracking-wider uppercase transition-colors ${mode === option ? 'bg-stone-950 text-white' : 'hover:bg-stone-100'}`}
                                             >
                                                 {option}
                                             </button>
                                         ))}
                                     </div>
                                 </fieldset>
+
                                 <button
                                     type="button"
                                     onClick={resetControls}
-                                    className="inline-flex items-center justify-center gap-2 border-t border-stone-400 pt-4 font-mono text-[10px] font-bold tracking-wider uppercase hover:text-[#b42b1e] focus-visible:outline-2 focus-visible:outline-offset-4 focus-visible:outline-[#b42b1e]"
+                                    className="inline-flex items-center justify-center gap-2 border-t border-stone-400 pt-3 font-mono text-[10px] font-bold tracking-wider text-stone-700 uppercase hover:text-[#b42b1e] focus-visible:outline-2 focus-visible:outline-offset-4 focus-visible:outline-[#b42b1e]"
                                 >
-                                    <RotateCcw size={14} /> Reset controls
+                                    <RotateCcw size={13} /> Reset to defaults
                                 </button>
                             </div>
 
+                            {/* Export & Print Action Grid */}
                             <div className="grid gap-3">
+                                {/* Copy & Save to Device (Top Actions) */}
+                                <div className="grid grid-cols-2 gap-3">
+                                    <ActionButton
+                                        disabled={!hasImage}
+                                        onClick={copyReceiptToClipboard}
+                                        tone="ink"
+                                    >
+                                        {isCopied ? (
+                                            <>
+                                                <Check
+                                                    size={15}
+                                                    className="text-emerald-400"
+                                                />{' '}
+                                                Copied!
+                                            </>
+                                        ) : (
+                                            <>
+                                                <Copy size={15} /> Copy Image
+                                            </>
+                                        )}
+                                    </ActionButton>
+                                    <ActionButton
+                                        disabled={!hasImage}
+                                        onClick={downloadReceipt}
+                                        tone="ink"
+                                    >
+                                        <Download size={15} /> Save Device
+                                    </ActionButton>
+                                </div>
+
+                                {/* Direct Hardware Printing */}
                                 <div className="grid gap-3 sm:grid-cols-2">
                                     <ActionButton
                                         disabled={!hasImage || isPrinterBusy}
@@ -1155,52 +1603,42 @@ export default function Welcome() {
                                         <Bluetooth size={16} />{' '}
                                         {printerState === 'printing'
                                             ? 'Printing…'
-                                            : 'Print Bluetooth'}
+                                            : 'Print BT'}
                                     </ActionButton>
                                 </div>
+
+                                {/* Printer Diagnostics */}
                                 <div className="grid gap-3 sm:grid-cols-2">
                                     <ActionButton
                                         disabled={isPrinterBusy}
                                         onClick={testUsbConnection}
+                                        tone="subtle"
                                     >
-                                        <Usb size={15} />{' '}
+                                        <Usb size={14} />{' '}
                                         {printerState === 'testing'
                                             ? 'Testing…'
-                                            : 'Test USB · Feed paper'}
+                                            : 'Feed USB'}
                                     </ActionButton>
                                     <ActionButton
                                         disabled={isPrinterBusy}
                                         onClick={testBluetoothConnection}
+                                        tone="subtle"
                                     >
-                                        <Bluetooth size={15} />{' '}
+                                        <Bluetooth size={14} />{' '}
                                         {printerState === 'testing'
                                             ? 'Testing…'
-                                            : 'Test Bluetooth · Feed paper'}
+                                            : 'Feed BT'}
                                     </ActionButton>
                                 </div>
-                                <p className="font-mono text-[10px] leading-5 tracking-wide text-stone-600">
-                                    Each test sends only an ESC/POS feed
-                                    command; it rolls paper forward without
-                                    printing. USB: choose{' '}
-                                    <strong>Virtual PRN</strong> in the USB
-                                    picker. Bluetooth: pair{' '}
-                                    <strong>{RPP02N_BLUETOOTH_NAME}</strong> in
-                                    your system settings, then select it in
-                                    Chrome or Edge.
-                                </p>
-                                <div className="grid grid-cols-2 gap-3">
+
+                                <div className="grid grid-cols-1">
                                     <ActionButton
                                         disabled={!hasImage}
                                         onClick={() => window.print()}
-                                        tone="ink"
+                                        tone="subtle"
                                     >
-                                        <Printer size={15} /> System
-                                    </ActionButton>
-                                    <ActionButton
-                                        disabled={!hasImage}
-                                        onClick={download}
-                                    >
-                                        <Download size={15} /> PNG
+                                        <Printer size={15} /> System Print
+                                        Dialog
                                     </ActionButton>
                                 </div>
                             </div>
@@ -1233,11 +1671,183 @@ export default function Welcome() {
                             )}
                         </section>
                     </div>
+
+                    {/* 04 / History Photo Roll */}
+                    <section className="mt-8 border-t-2 border-stone-950 pt-8 pb-12">
+                        <div className="mb-6 flex flex-wrap items-end justify-between gap-4">
+                            <div>
+                                <p className="thermal-kicker">04 / Roll</p>
+                                <div className="flex items-center gap-3">
+                                    <h2 className="thermal-heading">
+                                        Photo History
+                                    </h2>
+                                    <span className="border border-stone-950 bg-stone-950 px-2 py-0.5 font-mono text-[11px] font-bold text-white">
+                                        {historyPhotos.length}{' '}
+                                        {historyPhotos.length === 1
+                                            ? 'shot'
+                                            : 'shots'}
+                                    </span>
+                                </div>
+                                <p className="mt-1 font-mono text-[10px] tracking-wide text-stone-600 uppercase">
+                                    Persisted in session roll · Click any photo
+                                    to load onto receipt preview
+                                </p>
+                            </div>
+
+                            {historyPhotos.length > 0 && (
+                                <div className="flex items-center gap-3">
+                                    <button
+                                        type="button"
+                                        onClick={() =>
+                                            setIsClearHistoryOpen(true)
+                                        }
+                                        className="inline-flex items-center gap-1.5 border border-stone-400 bg-white/80 px-3 py-1.5 font-mono text-[10px] font-bold tracking-wider text-stone-700 uppercase shadow-[2px_2px_0_#1c1917] transition-all hover:bg-red-50 hover:text-red-700"
+                                    >
+                                        <Trash2 size={13} />
+                                        <span>Clear History</span>
+                                    </button>
+                                </div>
+                            )}
+                        </div>
+
+                        {historyPhotos.length === 0 ? (
+                            <div className="grid min-h-48 place-items-center border-2 border-dashed border-stone-400 bg-[#f7f1e3]/40 p-8 text-center">
+                                <div className="grid justify-items-center gap-3 text-stone-500">
+                                    <div className="grid size-12 place-items-center rounded-full border border-stone-400 bg-white shadow-[3px_3px_0_#1c1917]">
+                                        <Clock size={22} strokeWidth={1.5} />
+                                    </div>
+                                    <p className="font-serif text-lg font-bold text-stone-800">
+                                        No photos taken in this session yet
+                                    </p>
+                                    <p className="max-w-md font-mono text-[10px] leading-4 tracking-wider uppercase">
+                                        Take a snapshot with the camera or
+                                        upload an image to automatically add
+                                        shots to your historical roll.
+                                    </p>
+                                    <ActionButton
+                                        onClick={() => setIsCameraOpen(true)}
+                                        tone="red"
+                                        className="mt-2"
+                                    >
+                                        <Camera size={15} /> Take First Photo
+                                    </ActionButton>
+                                </div>
+                            </div>
+                        ) : (
+                            <div className="grid grid-cols-2 gap-4 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-6">
+                                {historyPhotos.map((photo, index) => {
+                                    const isActive =
+                                        activePhotoId === photo.id ||
+                                        fileName === photo.name;
+                                    const formattedTime = new Date(
+                                        photo.timestamp,
+                                    ).toLocaleTimeString([], {
+                                        hour: '2-digit',
+                                        minute: '2-digit',
+                                        second: '2-digit',
+                                    });
+
+                                    return (
+                                        <div
+                                            key={photo.id}
+                                            onClick={() =>
+                                                loadHistoryPhoto(photo)
+                                            }
+                                            className={`group relative flex cursor-pointer flex-col border-2 bg-white p-2.5 transition-all hover:-translate-y-1 hover:shadow-[5px_5px_0_#1c1917] ${
+                                                isActive
+                                                    ? 'border-[#b42b1e] ring-2 ring-[#b42b1e] shadow-[4px_4px_0_#b42b1e]'
+                                                    : 'border-stone-950 shadow-[3px_3px_0_#1c1917]'
+                                            }`}
+                                        >
+                                            {/* Photo Thumbnail */}
+                                            <div className="relative aspect-square w-full overflow-hidden border border-stone-300 bg-stone-900">
+                                                <img
+                                                    src={
+                                                        photo.thumbnailUrl ||
+                                                        photo.dataUrl
+                                                    }
+                                                    alt={photo.name}
+                                                    className="h-full w-full object-cover"
+                                                />
+                                                {isActive && (
+                                                    <span className="absolute top-1 left-1 bg-[#b42b1e] px-1.5 py-0.5 font-mono text-[8px] font-bold tracking-wider text-white uppercase">
+                                                        Active
+                                                    </span>
+                                                )}
+                                                <span className="absolute right-1 bottom-1 bg-stone-950/80 px-1 py-0.5 font-mono text-[8px] font-semibold text-white backdrop-blur-xs">
+                                                    #{historyPhotos.length - index}
+                                                </span>
+                                            </div>
+
+                                            {/* Metadata */}
+                                            <div className="mt-2 flex flex-col gap-1">
+                                                <div className="flex items-center justify-between text-[9px] text-stone-500 font-mono uppercase">
+                                                    <span className="flex items-center gap-1">
+                                                        {photo.source ===
+                                                        'camera' ? (
+                                                            <Camera size={10} />
+                                                        ) : (
+                                                            <ImageIcon
+                                                                size={10}
+                                                            />
+                                                        )}
+                                                        {photo.source}
+                                                    </span>
+                                                    <span>{formattedTime}</span>
+                                                </div>
+                                                <p className="truncate font-mono text-[10px] font-bold text-stone-900">
+                                                    {photo.name}
+                                                </p>
+                                            </div>
+
+                                            {/* Action Strip on Card */}
+                                            <div className="mt-2.5 flex items-center justify-between border-t border-stone-200 pt-2 text-stone-700">
+                                                <button
+                                                    type="button"
+                                                    title="Save raw photo to device"
+                                                    onClick={(e) => {
+                                                        e.stopPropagation();
+                                                        downloadRawPhoto(
+                                                            photo.dataUrl,
+                                                            photo.name,
+                                                        );
+                                                    }}
+                                                    className="inline-flex items-center gap-0.5 p-1 font-mono text-[9px] hover:text-[#b42b1e]"
+                                                >
+                                                    <Download size={12} />
+                                                    <span className="sr-only">
+                                                        Save
+                                                    </span>
+                                                </button>
+                                                <button
+                                                    type="button"
+                                                    title="Delete photo from history"
+                                                    onClick={(e) =>
+                                                        handleDeletePhoto(
+                                                            photo.id,
+                                                            e,
+                                                        )
+                                                    }
+                                                    className="inline-flex items-center gap-0.5 p-1 font-mono text-[9px] hover:text-red-700"
+                                                >
+                                                    <Trash2 size={12} />
+                                                    <span className="sr-only">
+                                                        Delete
+                                                    </span>
+                                                </button>
+                                            </div>
+                                        </div>
+                                    );
+                                })}
+                            </div>
+                        )}
+                    </section>
                 </div>
 
+                {/* Live Camera Dialog */}
                 <Dialog open={isCameraOpen} onOpenChange={setIsCameraOpen}>
                     <DialogContent className="block max-w-2xl gap-0 rounded-none border-2 border-stone-950 bg-[#e8dfcc] p-4 text-stone-950 shadow-[8px_8px_0_#b42b1e] sm:max-w-2xl sm:p-6">
-                        <header className="mb-4 border-b-2 border-stone-950 pb-4">
+                        <header className="mb-4 flex flex-wrap items-end justify-between gap-4 border-b-2 border-stone-950 pb-4">
                             <div>
                                 <p className="thermal-kicker">Live camera</p>
                                 <DialogTitle className="font-serif text-3xl leading-none font-black">
@@ -1248,6 +1858,46 @@ export default function Welcome() {
                                     capture or cancel.
                                 </DialogDescription>
                             </div>
+
+                            {/* Camera Settings Toolbar (Timer, Mirror) */}
+                            <div className="flex flex-wrap items-center gap-2">
+                                <div className="flex items-center gap-1 border border-stone-950 bg-white px-2 py-1 font-mono text-[10px] font-bold uppercase">
+                                    <Timer size={13} />
+                                    <span>Timer:</span>
+                                    {[0, 3, 5].map((sec) => (
+                                        <button
+                                            key={sec}
+                                            type="button"
+                                            onClick={() =>
+                                                setCountdownSetting(sec)
+                                            }
+                                            className={`px-1.5 py-0.5 ${
+                                                countdownSetting === sec
+                                                    ? 'bg-stone-950 text-white'
+                                                    : 'text-stone-700 hover:bg-stone-100'
+                                            }`}
+                                        >
+                                            {sec === 0 ? 'Off' : `${sec}s`}
+                                        </button>
+                                    ))}
+                                </div>
+
+                                <button
+                                    type="button"
+                                    onClick={() =>
+                                        setMirrorCamera((val) => !val)
+                                    }
+                                    className={`inline-flex items-center gap-1 border border-stone-950 px-2 py-1 font-mono text-[10px] font-bold uppercase ${
+                                        mirrorCamera
+                                            ? 'bg-stone-950 text-white'
+                                            : 'bg-white text-stone-800'
+                                    }`}
+                                    title="Mirror camera preview"
+                                >
+                                    <FlipHorizontal size={13} />
+                                    <span>Mirror</span>
+                                </button>
+                            </div>
                         </header>
 
                         <div className="relative aspect-[4/3] overflow-hidden border-2 border-stone-950 bg-stone-900">
@@ -1256,12 +1906,30 @@ export default function Welcome() {
                                 autoPlay
                                 muted
                                 playsInline
-                                className="h-full w-full -scale-x-100 object-cover"
+                                className={`h-full w-full object-cover ${
+                                    mirrorCamera ? '-scale-x-100' : ''
+                                }`}
                             />
+
+                            {/* Camera Starting State */}
                             {isCameraStarting && (
                                 <div className="absolute inset-0 grid place-items-center bg-stone-950 text-center font-mono text-xs tracking-widest text-white uppercase">
                                     Starting camera…
                                 </div>
+                            )}
+
+                            {/* Countdown Display Overlay */}
+                            {activeCountdown !== null && (
+                                <div className="absolute inset-0 grid place-items-center bg-black/40 backdrop-blur-xs">
+                                    <div className="animate-ping text-8xl font-black font-serif text-white drop-shadow-[0_4px_12px_rgba(0,0,0,0.8)]">
+                                        {activeCountdown}
+                                    </div>
+                                </div>
+                            )}
+
+                            {/* Camera Shutter Flash Effect */}
+                            {isFlashActive && (
+                                <div className="absolute inset-0 bg-white opacity-90 transition-opacity duration-150" />
                             )}
                         </div>
 
@@ -1283,12 +1951,50 @@ export default function Welcome() {
                             <ActionButton
                                 disabled={
                                     isCameraStarting ||
-                                    cameraStreamRef.current === null
+                                    cameraStreamRef.current === null ||
+                                    activeCountdown !== null
                                 }
-                                onClick={capturePhoto}
+                                onClick={triggerCaptureWithCountdown}
                                 tone="red"
                             >
-                                <Camera size={16} /> Capture photo
+                                <Camera size={16} />{' '}
+                                {activeCountdown !== null
+                                    ? `Snapping in ${activeCountdown}s…`
+                                    : countdownSetting > 0
+                                      ? `Capture (${countdownSetting}s timer)`
+                                      : 'Capture photo'}
+                            </ActionButton>
+                        </div>
+                    </DialogContent>
+                </Dialog>
+
+                {/* Confirmation Dialog for Clearing History */}
+                <Dialog
+                    open={isClearHistoryOpen}
+                    onOpenChange={setIsClearHistoryOpen}
+                >
+                    <DialogContent className="block max-w-md gap-0 rounded-none border-2 border-stone-950 bg-[#e8dfcc] p-6 text-stone-950 shadow-[6px_6px_0_#1c1917]">
+                        <header className="mb-4 border-b-2 border-stone-950 pb-3">
+                            <DialogTitle className="font-serif text-2xl font-black">
+                                Clear Photo History?
+                            </DialogTitle>
+                            <DialogDescription className="mt-1 font-mono text-xs text-stone-600">
+                                This will remove all {historyPhotos.length}{' '}
+                                photos from your session roll. This action
+                                cannot be undone.
+                            </DialogDescription>
+                        </header>
+                        <div className="mt-6 flex justify-end gap-3">
+                            <ActionButton
+                                onClick={() => setIsClearHistoryOpen(false)}
+                            >
+                                Keep photos
+                            </ActionButton>
+                            <ActionButton
+                                onClick={handleClearAllHistory}
+                                tone="red"
+                            >
+                                Yes, Clear All
                             </ActionButton>
                         </div>
                     </DialogContent>
